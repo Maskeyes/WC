@@ -8,26 +8,61 @@ from PIL import Image
 CSV_FILE = 'profiles.csv'
 PHOTOS_FOLDER = 'photos'
 
+@st.cache_data # CRITICAL FIX: Cache the data load to prevent repeated file access and redirection loops
 def load_data():
     """Loads the profile data from the CSV file, attempting to detect the correct delimiter."""
     try:
         # 1. First, attempt to detect the delimiter
         dialect = None
+        # Use Streamlit's environment structure: paths are relative to the root of the app
         with open(CSV_FILE, 'r', newline='', encoding='utf-8') as f:
             # Read a small sample of the file to determine the dialect (including delimiter)
             sample = f.read(1024)
-            dialect = csv.Sniffer().sniff(sample)
-
+            # Check if sample is empty, indicating an empty file
+            if not sample:
+                st.error(f"Error: The file '{CSV_FILE}' is empty.")
+                return pd.DataFrame()
+            
+            # Sniff the dialect only if there's content to sniff
+            if sample.strip():
+                dialect = csv.Sniffer().sniff(sample)
+            else:
+                # Default to comma if sample is all whitespace
+                dialect = csv.excel()
+                
         # 2. Read the CSV using the detected delimiter
         df = pd.read_csv(CSV_FILE, sep=dialect.delimiter, encoding='utf-8')
         
-        # Ensure required columns are present.
-        required_cols = ['Name', 'Birthday', 'Town/County', 'Country']
-        for col in required_cols:
-            if col not in df.columns:
-                st.error(f"Error: The required column '{col}' is missing from '{CSV_FILE}'.")
-                st.info("Please ensure your CSV file has the exact column headers: 'Name', 'Birthday', 'Town/County', 'Country'")
+        # Ensure required columns are present and fix case
+        required_cols_map = {
+            'Name': 'Name', 
+            'Birthday': 'Birthday', 
+            'Town/County': 'Town/County', 
+            'Country': 'Country' # Use the correct capitalization for keying
+        }
+        
+        # Normalize column names in the DataFrame to handle inconsistent capitalization
+        df.columns = [col.strip().replace('_', ' ') for col in df.columns]
+
+        for required_col, target_col in required_cols_map.items():
+            # Check for close matches (e.g., 'country', 'Country', 'COUNTRY')
+            found_col = None
+            for col in df.columns:
+                if col.lower() == required_col.lower():
+                    found_col = col
+                    break
+            
+            if found_col and found_col != target_col:
+                df.rename(columns={found_col: target_col}, inplace=True)
+            elif found_col is None:
+                st.error(f"Error: The required column '{required_col}' is missing from '{CSV_FILE}'.")
+                st.info("Please ensure your CSV file has columns for 'Name', 'Birthday', 'Town/County', and 'Country'.")
                 return pd.DataFrame() # Return empty DataFrame on failure
+
+        # Final check to ensure all target columns exist after normalization
+        if not all(col in df.columns for col in required_cols_map.values()):
+             st.error("Column mapping failed after attempting to normalize names. Please verify your CSV headers.")
+             return pd.DataFrame()
 
         # Convert Name to string and fill NaNs
         df['Name'] = df['Name'].astype(str).fillna('Unknown Profile')
@@ -36,9 +71,8 @@ def load_data():
         st.error(f"Error: The file '{CSV_FILE}' was not found. Please place it in the application directory.")
         return pd.DataFrame()
     except Exception as e:
-        # Catch the tokenization error and provide a more helpful message
         st.error(f"An unexpected error occurred while loading the CSV: {e}")
-        st.warning("If this is a tokenizing error, your file might not be a standard CSV. Please open it, ensure it only contains text data, and save it explicitly as 'CSV (Comma delimited)'.")
+        st.warning("Please ensure your file is a standard CSV (Comma delimited) with correct headers.")
         return pd.DataFrame()
 
 def get_image_path(name):
@@ -47,36 +81,37 @@ def get_image_path(name):
     the first name of the profile. This is highly flexible for existing filenames.
     """
     try:
-        # CRITICAL CHANGE: Extract the first word (the first name) and normalize it
+        # Extract the first word (the first name) and normalize it
         # Example: "Ekene Amobi" -> "ekene"
         first_name = name.strip().split(' ')[0].lower()
         if not first_name:
             return None # Handle empty name string
 
-        # List all files in the photos directory
-        for filename in os.listdir(PHOTOS_FOLDER):
-            # Normalize the filename for case-insensitive checking
+        # Get the current working directory reliably
+        current_dir = os.path.dirname(__file__) if '__file__' in locals() else os.getcwd()
+        photos_dir = os.path.join(current_dir, PHOTOS_FOLDER)
+        
+        if not os.path.isdir(photos_dir):
+            # Fallback for deployment environments where current_dir might be different
+            photos_dir = PHOTOS_FOLDER
+            if not os.path.isdir(photos_dir):
+                return None 
+
+        for filename in os.listdir(photos_dir):
             normalized_filename = filename.lower()
             
             # Check if the extracted first name is contained anywhere in the filename
-            # This handles files like 'Ekene.jpg', 'Ekene Amobi.jpg', '2023-06-01~2 - Ekene amobi.jpg', etc.
             if first_name in normalized_filename:
                 # Return the full path of the first match found
-                return os.path.join(PHOTOS_FOLDER, filename)
+                return os.path.join(photos_dir, filename)
                 
-    except FileNotFoundError:
-        # If the photos folder doesn't exist, this function will fail gracefully.
-        pass
     except Exception as e:
-        # Print error for debugging, but continue
         print(f"Error processing files in photos folder: {e}")
         
-    # If no image found after checking all files, return None
     return None
 
 def display_profile_card(row):
-    """Displays a single profile card, now vertically stacked with a larger, centered photo,
-    and attempts to fix image orientation based on EXIF data."""
+    """Displays a single profile card, vertically stacked with a larger, centered photo."""
     
     image_path = get_image_path(row['Name'])
 
@@ -88,17 +123,17 @@ def display_profile_card(row):
         col_left, col_img, col_right = st.columns([0.5, 3, 0.5])
         
         with col_img:
-            image_width = 200 # Slightly increased size for prominence
+            image_width = 200 # Size for prominence
             
-            if image_path:
+            if image_path and os.path.exists(image_path):
                 try:
                     img = Image.open(image_path)
                     
                     # *** FIX FOR EXIF ORIENTATION ***
-                    # Checks for orientation tag and fixes rotation in place
-                    if hasattr(img, '_getexif') and img._getexif():
-                        exif = dict(img._getexif().items())
-                        orientation = exif.get(0x0112) # 0x0112 is the EXIF Orientation tag
+                    # This attempts to read and apply orientation fix from metadata
+                    exif_data = img.getexif()
+                    if exif_data is not None:
+                        orientation = exif_data.get(0x0112)
                         
                         if orientation == 3:
                             img = img.transpose(Image.ROTATE_180)
@@ -107,23 +142,21 @@ def display_profile_card(row):
                         elif orientation == 8:
                             img = img.transpose(Image.ROTATE_90)
                     
-                    # Streamlit will maintain the aspect ratio, but we set a larger width
                     st.image(img, width=image_width) 
                 except Exception as e:
                     # Fallback for image loading issues
-                    st.warning(f"Could not load image for {row['Name']}. Error: {e}")
+                    st.warning(f"Could not load image for {row['Name']}.")
                     # Placeholder image to hint at portrait style (200x250)
                     st.image("https://placehold.co/200x250/CCCCCC/888888?text=No+Photo", width=image_width)
             else:
                 # Placeholder image
                 st.image("https://placehold.co/200x250/CCCCCC/888888?text=No+Photo", width=image_width)
 
-        # --- Details (Beneath the photo, centered) ---
-        # The text now stacks vertically below the image columns.
+        # --- Details (Beneath the photo, centered, reduced spacing) ---
         
-        # Center the text using CSS in Markdown and reduce margin-top to 0px 
-        # for minimal spacing between the photo and the details.
-        st.markdown("<div style='text-align: center; margin-top: 0px;'>", unsafe_allow_html=True)
+        # Center the text using CSS in Markdown and reduce margin-top 
+        # The <br> adds minimal spacing after the image
+        st.markdown("<div style='text-align: center; margin-top: -15px;'>", unsafe_allow_html=True) 
         
         # Name (Larger font)
         st.markdown(f"**<span style='font-size: 1.4em;'>{row['Name']}</span>**", unsafe_allow_html=True)
@@ -132,7 +165,7 @@ def display_profile_card(row):
         st.markdown(f"*{row.get('Country', 'N/A')}*")
         
         # Birthday (with Cake emoji)
-        st.markdown(f"<div style='font-size: 0.9em; color: #555;'>🎂 {row.get('Birthday', 'N/A')}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size: 0.9em; color: #555; margin-top: 5px;'>🎂 {row.get('Birthday', 'N/A')}</div>", unsafe_allow_html=True)
         
         # Town/County (with House emoji)
         st.markdown(f"<div style='font-size: 0.9em; color: #555;'>🏠 {row.get('Town/County', 'N/A')}</div>", unsafe_allow_html=True)
@@ -142,9 +175,9 @@ def display_profile_card(row):
 
 def main():
     """Main function to run the Streamlit application."""
-    st.set_page_config(layout="wide", page_title="Group Profiles")
+    st.set_page_config(layout="wide", page_title="Team Profiles")
     
-    st.title("👥 Group Profiles")
+    st.title("👥 Team Profiles")
     
     df = load_data()
 
@@ -192,13 +225,10 @@ def main():
     col_index = 0
 
     for index, row in filtered_df.iterrows():
-        # Place the card in the current column (col_index)
         with cols[col_index]:
             display_profile_card(row)
-            # Add a small separator inside the column for vertical stacking
             st.markdown("<br>", unsafe_allow_html=True) 
             
-        # Move to the next column, wrapping around (0 -> 1 -> 2 -> 0 -> ...)
         col_index = (col_index + 1) % NUM_COLUMNS
         
     st.markdown("<br><br>", unsafe_allow_html=True) 
