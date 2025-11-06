@@ -7,6 +7,7 @@ import io
 import base64
 
 # --- Configuration ---
+# Set page layout to wide for better use of screen space
 st.set_page_config(layout="wide")
 CSV_FILE = 'profiles.csv'
 PHOTOS_FOLDER = 'photos'
@@ -28,7 +29,8 @@ def load_data():
                 st.error(f"Error: The file '{CSV_FILE}' is empty.")
                 return pd.DataFrame()
             
-            dialect = csv.Sniffer().sniff(sample)
+            # Use a slightly more lenient sniffer approach
+            dialect = csv.Sniffer().sniff(sample) if sample.strip() else csv.excel()
             
         # 2. Read the CSV using the detected delimiter
         df = pd.read_csv(CSV_FILE, sep=dialect.delimiter, encoding='utf-8')
@@ -76,30 +78,32 @@ def get_image_path(name):
             return None
 
         # Robust path handling for deployment
-        photos_dir = os.path.join(os.getcwd(), PHOTOS_FOLDER)
-
+        photos_dir = PHOTOS_FOLDER
+        
         if not os.path.isdir(photos_dir):
-             photos_dir = PHOTOS_FOLDER
-             if not os.path.isdir(photos_dir):
-                 return None
+             return None
 
         for filename in os.listdir(photos_dir):
             normalized_filename = filename.lower()
             
             if first_name in normalized_filename:
-                return os.path.join(photos_dir, filename)
+                # Return the full path relative to the app root
+                return os.path.join(PHOTOS_FOLDER, filename)
                 
     except Exception:
-        # Ignore file system errors and return None
         pass
         
     return None
 
-def get_base64_image(image_path):
-    """Loads image, fixes EXIF orientation, and returns base64 string for HTML."""
+def get_base64_image_src(image_path):
+    """
+    Loads image, fixes EXIF orientation, and returns a data URL (base64 string) 
+    for direct embedding into HTML.
+    """
+    placeholder_url = 'https://placehold.co/300x400/CCCCCC/888888?text=No+Photo'
+
     if not image_path or not os.path.exists(image_path):
-        # Return a Base64 string for a placeholder image
-        return 'https://placehold.co/300x400/CCCCCC/888888?text=No+Photo'
+        return placeholder_url
 
     try:
         img = Image.open(image_path)
@@ -118,15 +122,14 @@ def get_base64_image(image_path):
                             img = img.rotate(90, expand=True)
                         break
 
-        # Convert PIL Image to Base64
+        # Convert PIL Image to Base64 (using PNG format for wide compatibility)
         buffered = io.BytesIO()
         img.save(buffered, format="PNG")
         img_str = base64.b64encode(buffered.getvalue()).decode()
         return f"data:image/png;base64,{img_str}"
 
     except Exception:
-        # Fallback to placeholder image URL on error
-        return 'https://placehold.co/300x400/CCCCCC/888888?text=Error+Loading'
+        return placeholder_url
 
 
 # --- Custom HTML/CSS for Flippable Card and Pinterest Grid ---
@@ -140,25 +143,48 @@ def set_custom_css():
     /* Hide the default Streamlit title and header elements */
     .st-emotion-cache-18ni7ap, .st-emotion-cache-10oheav { display: none !important; } 
     
-    /* 2. Pinterest-style Grid Layout (Flexbox) */
+    /* 2. Pinterest-style Masonry Grid Layout (using column layout) */
     .pinterest-grid {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 1.5rem; /* Space between cards */
-        justify-content: center; /* Center the grid on the page */
+        column-count: 4; /* Default to 4 columns for large screens */
+        column-gap: 1.5rem; /* Space between columns */
+        width: 100%;
+        max-width: 1200px; /* Limit width for aesthetics */
+        margin: 0 auto;
+    }
+    
+    /* Responsive adjustments for smaller screens */
+    @media (max-width: 1024px) {
+        .pinterest-grid {
+            column-count: 3;
+        }
+    }
+    @media (max-width: 768px) {
+        .pinterest-grid {
+            column-count: 2;
+        }
+    }
+    @media (max-width: 480px) {
+        .pinterest-grid {
+            column-count: 1; /* Single column on small mobile screens */
+        }
+    }
+
+    /* Cards must not break across columns */
+    .flip-card {
+        -webkit-column-break-inside: avoid;
+        page-break-inside: avoid;
+        break-inside: avoid;
+        
+        background-color: transparent;
+        width: 100%; /* Take full width of the column */
+        height: 400px; /* Fixed height for visual consistency */
+        perspective: 1000px; 
+        box-shadow: 0 8px 16px 0 rgba(0,0,0,0.2);
+        border-radius: 12px;
+        margin-bottom: 25px; /* Spacing between cards in the column */
     }
 
     /* 3. Flip Card Styles */
-    .flip-card {
-        background-color: transparent;
-        width: 300px; /* Card size - set for a nice balance in the grid */
-        height: 400px;
-        perspective: 1000px; /* 3D effect */
-        box-shadow: 0 8px 16px 0 rgba(0,0,0,0.2);
-        border-radius: 12px;
-        margin-bottom: 25px; /* Add extra spacing for grid effect */
-    }
-
     .flip-card-inner {
         position: relative;
         width: 100%;
@@ -178,7 +204,7 @@ def set_custom_css():
         position: absolute;
         width: 100%;
         height: 100%;
-        -webkit-backface-visibility: hidden; /* Safari */
+        -webkit-backface-visibility: hidden; 
         backface-visibility: hidden;
         border-radius: 12px;
         display: flex;
@@ -192,13 +218,13 @@ def set_custom_css():
     .flip-card-front {
         background-color: #ffffff; 
         color: black;
-        justify-content: flex-start; /* Start content from top */
+        justify-content: flex-start;
     }
     
     /* Image sizing on the front */
     .flip-card-front img {
         width: 100%; 
-        height: 80%; /* Takes up most of the card height */
+        height: 80%; 
         object-fit: cover; 
         border-radius: 8px;
         margin-bottom: 10px;
@@ -206,10 +232,10 @@ def set_custom_css():
 
     /* Back Side Styling */
     .flip-card-back {
-        background-color: #007bff; /* Use a bright color for contrast */
+        background-color: #007bff; 
         color: white;
         transform: rotateY(180deg);
-        justify-content: center; /* Center content vertically */
+        justify-content: center; 
         text-align: center;
     }
     
@@ -217,7 +243,7 @@ def set_custom_css():
         margin-top: 15px;
         margin-bottom: 5px;
         font-weight: 400;
-        color: #e0e0e0; /* Subtle heading color */
+        color: #e0e0e0;
         font-size: 1.1rem;
     }
     .flip-card-back p {
@@ -232,7 +258,7 @@ def set_custom_css():
         font-size: 1.6rem;
         font-weight: bold;
         color: #333; 
-        margin-top: auto; /* Pushes name to the bottom */
+        margin-top: auto;
     }
     
     </style>
@@ -272,7 +298,6 @@ def main():
 
     # Apply Search Query Filter
     if search_query:
-        # Search across all relevant columns
         search_mask = filtered_df.apply(lambda row: 
             search_query in ' '.join([
                 str(row['Name']), str(row['Birthday']), 
@@ -282,7 +307,7 @@ def main():
         
     # --- Profile Card Rendering (Pinterest Grid) ---
     
-    # Start the custom HTML container for the grid
+    # Start the custom HTML container for the Masonry grid
     st.markdown('<div class="pinterest-grid">', unsafe_allow_html=True)
     
     if filtered_df.empty:
@@ -298,11 +323,8 @@ def main():
             town = row['Town/County']
             country = row['Country']
             
-            # Use the person's Name to find the image path (Fixes KeyError)
             image_path = get_image_path(name)
-            
-            # Get the Base64 image string for direct HTML embedding
-            img_src = get_base64_image(image_path)
+            img_src = get_base64_image_src(image_path)
             
             # --- Build Card HTML ---
             card_html = f"""
@@ -332,6 +354,7 @@ def main():
               </div>
             </div>
             """
+            # Render the complete, self-contained HTML block
             st.markdown(card_html, unsafe_allow_html=True)
 
     # End the custom HTML container
