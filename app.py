@@ -13,7 +13,7 @@ st.set_page_config(layout="wide", page_title="Team Profiles")
 
 @st.cache_data # CRITICAL FIX: Cache the data load to prevent repeated file access and redirection loops
 def load_data():
-    """Loads the profile data from the CSV file, attempting to detect the correct delimiter."""
+    """Loads the profile data from the CSV file, attempting to detect the correct delimiter and standardizing country names."""
     try:
         if not os.path.exists(CSV_FILE):
              st.error(f"Error: The required file '{CSV_FILE}' was not found.")
@@ -21,14 +21,13 @@ def load_data():
              
         # 1. First, attempt to detect the delimiter
         dialect = None
-        with open(CSV_FILE, 'r', newline='', encoding='utf-8') as f:
+        with open(CSV_FILE, 'r', newline='\n', encoding='utf-8') as f: # Use '\n' for robustness
             sample = f.read(1024)
             if not sample:
                 st.error(f"Error: The file '{CSV_FILE}' is empty.")
                 return pd.DataFrame()
             
             if sample.strip():
-                # Sniff the dialect only if there's content to sniff
                 dialect = csv.Sniffer().sniff(sample)
             else:
                 dialect = csv.excel()
@@ -64,6 +63,13 @@ def load_data():
         # Final check to ensure all target columns exist after normalization
         if not all(col in df.columns for col in required_cols_map.values()):
              return pd.DataFrame()
+
+        # --- CRITICAL FIX: Country Data Cleaning for Unique Filters ---
+        if 'Country' in df.columns:
+            # 1. Strip whitespace
+            df['Country'] = df['Country'].astype(str).str.strip()
+            # 2. Apply Title case (e.g., 'united kingdom' -> 'United Kingdom')
+            df['Country'] = df['Country'].str.title() 
 
         # Convert Name to string and fill NaNs
         df['Name'] = df['Name'].astype(str).fillna('Unknown Profile')
@@ -182,7 +188,8 @@ def main():
     # Name Search (case-insensitive partial match)
     search_query = st.sidebar.text_input("Search by Name", "")
 
-    # Country Filter (Unique countries from data)
+    # Country Filter (Unique countries from cleaned data)
+    # The cleaning in load_data ensures this list is unique.
     all_countries = ['All'] + sorted(df['Country'].unique().tolist())
     country_select = st.sidebar.selectbox("Filter by Country", all_countries)
     
