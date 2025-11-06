@@ -1,68 +1,113 @@
 import streamlit as st
 import pandas as pd
-from PIL import Image, ExifTags
 import os
+import csv
+from PIL import Image, ExifTags
 import io
+import base64
 
 # --- Configuration ---
-# Set page layout to wide for better use of screen space
 st.set_page_config(layout="wide")
-
-# Path configuration for deployment (case-sensitive on Render/Streamlit Cloud)
-PHOTOS_FOLDER = 'photos'
 CSV_FILE = 'profiles.csv'
+PHOTOS_FOLDER = 'photos'
 
 # --- Utility Functions ---
 
-# Use st.cache_data to load the CSV file once and cache the result. 
-# This is crucial for fast and stable deployment on Render/Streamlit Cloud.
 @st.cache_data
 def load_data():
-    """Loads profile data from CSV."""
+    """Loads the profile data from the CSV file and normalizes column names."""
     if not os.path.exists(CSV_FILE):
         st.error(f"Error: Required file '{CSV_FILE}' not found in the root directory.")
         return pd.DataFrame()
     
     try:
-        data = pd.read_csv(CSV_FILE)
-        return data
+        # 1. Detect delimiter using csv.Sniffer
+        with open(CSV_FILE, 'r', newline='', encoding='utf-8') as f:
+            sample = f.read(1024)
+            if not sample.strip():
+                st.error(f"Error: The file '{CSV_FILE}' is empty.")
+                return pd.DataFrame()
+            
+            dialect = csv.Sniffer().sniff(sample)
+            
+        # 2. Read the CSV using the detected delimiter
+        df = pd.read_csv(CSV_FILE, sep=dialect.delimiter, encoding='utf-8')
     except Exception as e:
         st.error(f"Error loading CSV data: {e}")
         return pd.DataFrame()
 
-def get_image_path(filename):
-    """
-    Constructs a robust path to the image file, handling potential 
-    case-sensitivity issues on Linux-based deployment servers (like Render).
-    """
-    # Use os.path.join for cross-OS compatibility
-    path = os.path.join(PHOTOS_FOLDER, filename)
+    # Define the exact column names the app code expects
+    required_cols_map = {
+        'name': 'Name',
+        'birthday': 'Birthday',
+        'town/county': 'Town/County',
+        'country': 'Country'
+    }
     
-    # Check for exact match
-    if os.path.exists(path):
-        return path
-    
-    # Check for case-insensitive match (safer on deployment)
+    # Normalize column names in the DataFrame to handle inconsistent capitalization
+    df.columns = [col.strip().replace('_', ' ') for col in df.columns]
+
+    # Map existing columns to the required names (case-insensitive check)
+    for lower_name, target_col in required_cols_map.items():
+        found_col = None
+        for col in df.columns:
+            if col.lower() == lower_name:
+                found_col = col
+                break
+            
+        if found_col and found_col != target_col:
+            df.rename(columns={found_col: target_col}, inplace=True)
+        elif found_col is None:
+            # Only raise an error if a critical column is missing
+            st.error(f"Error: The required column '{target_col}' is missing from '{CSV_FILE}'.")
+            return pd.DataFrame()
+
+    df['Name'] = df['Name'].astype(str).fillna('Unknown Profile')
+    return df
+
+def get_image_path(name):
+    """
+    Finds the image file in the photos folder where the filename contains
+    the first name of the profile (case-insensitive).
+    """
     try:
-        folder_contents = os.listdir(PHOTOS_FOLDER)
-        for content in folder_contents:
-            if content.lower() == filename.lower():
-                return os.path.join(PHOTOS_FOLDER, content)
-    except FileNotFoundError:
-        return None # Return None if photos folder is missing
+        first_name = name.strip().split(' ')[0].lower()
+        if not first_name:
+            return None
+
+        # Robust path handling for deployment
+        photos_dir = os.path.join(os.getcwd(), PHOTOS_FOLDER)
+
+        if not os.path.isdir(photos_dir):
+             photos_dir = PHOTOS_FOLDER
+             if not os.path.isdir(photos_dir):
+                 return None
+
+        for filename in os.listdir(photos_dir):
+            normalized_filename = filename.lower()
+            
+            if first_name in normalized_filename:
+                return os.path.join(photos_dir, filename)
+                
+    except Exception:
+        # Ignore file system errors and return None
+        pass
         
     return None
 
-def fix_image_orientation(img_path):
-    """Opens image, fixes EXIF orientation, and returns PIL Image object."""
+def get_base64_image(image_path):
+    """Loads image, fixes EXIF orientation, and returns base64 string for HTML."""
+    if not image_path or not os.path.exists(image_path):
+        # Return a Base64 string for a placeholder image
+        return 'https://placehold.co/300x400/CCCCCC/888888?text=No+Photo'
+
     try:
-        img = Image.open(img_path)
+        img = Image.open(image_path)
         
-        # Check for EXIF data
+        # --- FIX FOR EXIF ORIENTATION ---
         if hasattr(img, '_getexif'):
             exif = img._getexif()
             if exif is not None:
-                # Find the Orientation tag (274)
                 for tag, value in exif.items():
                     if ExifTags.TAGS.get(tag) == 'Orientation':
                         if value == 3:
@@ -72,11 +117,16 @@ def fix_image_orientation(img_path):
                         elif value == 8:
                             img = img.rotate(90, expand=True)
                         break
-        return img
+
+        # Convert PIL Image to Base64
+        buffered = io.BytesIO()
+        img.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+        return f"data:image/png;base64,{img_str}"
+
     except Exception:
-        # If the file is not an image or is corrupted, return a placeholder
-        # For simplicity, returning the path for a standard Streamlit error handling
-        return img_path
+        # Fallback to placeholder image URL on error
+        return 'https://placehold.co/300x400/CCCCCC/888888?text=Error+Loading'
 
 
 # --- Custom HTML/CSS for Flippable Card and Pinterest Grid ---
@@ -84,13 +134,11 @@ def set_custom_css():
     """Injects custom CSS for the Pinterest grid and 3D flip card effect."""
     st.markdown("""
     <style>
-    /* 1. Hide Streamlit Header, Footer, and Main Title/Count */
+    /* 1. Hide Streamlit Header, Footer, Title, and Count */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    
-    /* Hide the Streamlit H1 title and the "X profiles found" text which are 
-       Streamlit's default elements for st.title and st.dataframe */
-    .st-emotion-cache-18ni7ap { display: none !important; } /* Targets the main title/header container */
+    /* Hide the default Streamlit title and header elements */
+    .st-emotion-cache-18ni7ap, .st-emotion-cache-10oheav { display: none !important; } 
     
     /* 2. Pinterest-style Grid Layout (Flexbox) */
     .pinterest-grid {
@@ -106,8 +154,9 @@ def set_custom_css():
         width: 300px; /* Card size - set for a nice balance in the grid */
         height: 400px;
         perspective: 1000px; /* 3D effect */
-        box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2);
+        box-shadow: 0 8px 16px 0 rgba(0,0,0,0.2);
         border-radius: 12px;
+        margin-bottom: 25px; /* Add extra spacing for grid effect */
     }
 
     .flip-card-inner {
@@ -135,8 +184,7 @@ def set_custom_css():
         display: flex;
         flex-direction: column;
         align-items: center;
-        justify-content: center;
-        padding: 15px;
+        padding: 20px;
         box-sizing: border-box;
     }
 
@@ -144,48 +192,47 @@ def set_custom_css():
     .flip-card-front {
         background-color: #ffffff; 
         color: black;
-        border: 1px solid #e0e0e0;
-        
+        justify-content: flex-start; /* Start content from top */
     }
     
     /* Image sizing on the front */
     .flip-card-front img {
-        width: 100%; /* Fill the container width */
-        max-height: 250px; /* Fixed max height for consistency */
-        object-fit: cover; /* Ensures image fills space without stretching */
+        width: 100%; 
+        height: 80%; /* Takes up most of the card height */
+        object-fit: cover; 
         border-radius: 8px;
         margin-bottom: 10px;
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
     }
 
     /* Back Side Styling */
     .flip-card-back {
-        background-color: #262730; /* Dark background for contrast */
+        background-color: #007bff; /* Use a bright color for contrast */
         color: white;
         transform: rotateY(180deg);
-        justify-content: flex-start; /* Start content from top */
-        text-align: left;
-        padding: 30px;
+        justify-content: center; /* Center content vertically */
+        text-align: center;
     }
     
     .flip-card-back h4 {
         margin-top: 15px;
         margin-bottom: 5px;
-        font-weight: 600;
-        color: #8c9096; /* Subtle heading color */
+        font-weight: 400;
+        color: #e0e0e0; /* Subtle heading color */
+        font-size: 1.1rem;
     }
     .flip-card-back p {
         margin: 0;
-        font-size: 1.1rem;
+        font-size: 1.2rem;
+        font-weight: bold;
         color: #ffffff;
     }
     
     /* Name on Front Card */
     .profile-name-front {
-        font-size: 1.5rem;
+        font-size: 1.6rem;
         font-weight: bold;
-        color: #007bff; /* Highlight name color */
-        margin-top: 5px;
+        color: #333; 
+        margin-top: auto; /* Pushes name to the bottom */
     }
     
     </style>
@@ -207,14 +254,14 @@ def main():
 
     # --- Sidebar Filters ---
     with st.sidebar:
-        st.header("🔎 Filter Profiles")
+        st.header("🔎 Profile Filters")
         
         # 1. Search Bar
         search_query = st.text_input("Search by Name or Details", "").lower()
         
         # 2. Country Filter
         all_countries = ['All'] + sorted(df['Country'].unique().tolist())
-        selected_country = st.selectbox("Select Country", all_countries)
+        selected_country = st.selectbox("Filter by Country", all_countries)
     
     # --- Filtering Logic ---
     filtered_df = df.copy()
@@ -225,9 +272,12 @@ def main():
 
     # Apply Search Query Filter
     if search_query:
-        # Search across all columns (Name, Birthday, Town/County, Country)
+        # Search across all relevant columns
         search_mask = filtered_df.apply(lambda row: 
-            search_query in ' '.join(row.astype(str).str.lower()), axis=1)
+            search_query in ' '.join([
+                str(row['Name']), str(row['Birthday']), 
+                str(row['Town/County']), str(row['Country'])
+            ]).lower(), axis=1)
         filtered_df = filtered_df[search_mask]
         
     # --- Profile Card Rendering (Pinterest Grid) ---
@@ -244,60 +294,45 @@ def main():
         # Iterate over filtered profiles and render each as a flippable card
         for index, row in filtered_df.iterrows():
             name = row['Name']
-            photo_file = row['Photo File']
             birthday = row['Birthday']
             town = row['Town/County']
             country = row['Country']
             
-            image_path = get_image_path(photo_file)
+            # Use the person's Name to find the image path (Fixes KeyError)
+            image_path = get_image_path(name)
+            
+            # Get the Base64 image string for direct HTML embedding
+            img_src = get_base64_image(image_path)
             
             # --- Build Card HTML ---
-            
-            # Start the flip-card container
             card_html = f"""
             <div class="flip-card">
               <div class="flip-card-inner">
                 
-                <!-- Front Side: Photo and Name -->
+                <!-- Front Side: Photo and Bold Name -->
                 <div class="flip-card-front">
-                  <img src="data:image/png;base64," onerror="this.onerror=null; this.src='{image_path}';" alt="{name}">
+                  <img src="{img_src}" alt="{name}">
                   <div class="profile-name-front">{name}</div>
                 </div>
                 
                 <!-- Back Side: Details -->
                 <div class="flip-card-back">
-                  <h2 style="color: #007bff; margin-bottom: 20px;">{name}</h2>
-                  
-                  <h4>Birthday:</h4>
-                  <p>{birthday}</p>
+                  <h2 style="margin-bottom: 25px; font-size: 2rem;">{name}</h2>
                   
                   <h4>Town/County:</h4>
                   <p>{town}</p>
                   
                   <h4>Country:</h4>
                   <p>{country}</p>
+
+                  <h4>Birthday:</h4>
+                  <p>{birthday}</p>
                 </div>
                 
               </div>
             </div>
             """
-            
-            # The image path handling is tricky in Streamlit/Render HTML 
-            # We use an optimized way to display the image.
-            
-            img_to_render = fix_image_orientation(image_path)
-            
-            # Convert the PIL Image to base64 for direct embedding in the HTML
-            buffered = io.BytesIO()
-            img_to_render.save(buffered, format="PNG")
-            img_str = f"data:image/png;base64,{st.image(img_to_render, use_column_width='auto')}"
-            
-            # Re-render the HTML template with the correct base64 data injected
-            # Note: Streamlit's st.image is used to generate the base64 URL, 
-            # and then we use the generated image data in the custom HTML structure.
-            st.markdown(card_html.replace(f'<img src="data:image/png;base64,"', 
-                                          f'<img src="{img_str}"'), 
-                        unsafe_allow_html=True)
+            st.markdown(card_html, unsafe_allow_html=True)
 
     # End the custom HTML container
     st.markdown('</div>', unsafe_allow_html=True)
