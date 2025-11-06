@@ -87,10 +87,12 @@ def get_image_path(name):
             normalized_filename = filename.lower()
             
             if first_name in normalized_filename:
-                # Return the full path relative to the app root
+                # Return the full path relative to the app root (e.g., 'photos/image.jpg')
                 return os.path.join(PHOTOS_FOLDER, filename)
                 
-    except Exception:
+    except Exception as e:
+        # Diagnostic: If the app can't even list the directory
+        print(f"Error reading photos directory: {e}")
         pass
         
     return None
@@ -102,10 +104,15 @@ def get_base64_image_src(image_path):
     """
     placeholder_url = 'https://placehold.co/300x400/CCCCCC/888888?text=No+Photo'
 
-    if not image_path or not os.path.exists(image_path):
+    if not image_path:
         return placeholder_url
 
+    # CRITICAL CHECK: Use a try/except block that prints the failing path
     try:
+        if not os.path.exists(image_path):
+             print(f"DIAGNOSTIC: Image file not found at expected path: {image_path}")
+             return placeholder_url
+
         img = Image.open(image_path)
         
         # --- FIX FOR EXIF ORIENTATION ---
@@ -128,7 +135,9 @@ def get_base64_image_src(image_path):
         img_str = base64.b64encode(buffered.getvalue()).decode()
         return f"data:image/png;base64,{img_str}"
 
-    except Exception:
+    except Exception as e:
+        # Diagnostic: If the file was found but couldn't be processed (e.g., corrupted)
+        print(f"DIAGNOSTIC: Error processing image at {image_path}: {e}")
         return placeholder_url
 
 
